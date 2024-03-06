@@ -1,1 +1,167 @@
+package postilion.realtime.node.cardblocker;
+
+import javax.xml.bind.annotation.XmlElement;
+import javax.xml.bind.annotation.XmlRootElement;
+
+/**
+ * Describes the Structured Data tag AdditionalInfo and the contents thereof. The data
+ * structure is XML based hence this object is used to decode the object. e.g.
+ * 
+ * <pre>
+ * 	&lt;AdditionalInfo&gt;
+ * 		&lt;Transaction&gt;
+ * 			&lt;BufferB&gt;26812345678&lt;/BufferB&gt;
+ * 			&lt;BufferC&gt;1234&lt;/BufferC&gt;
+ * 		&lt;/Transaction&gt;
+ * 		&lt;Download&gt;
+ * 			&lt;ATMConfigID&gt;1024&lt;/ATMConfigID&gt;
+ * 			&lt;AtmAppConfigID&gt;1024&lt;/AtmAppConfigID&gt;
+ * 		&lt;/Download&gt;
+ * 	&lt;/AdditionalInfo&gt;
+ * </pre>
+ */
+@XmlRootElement(name = "AdditionalInfo")
+public class AdditionalInfo
+{
+	private Transaction transaction;
+	private Download download;
+
+	public Transaction getTransaction()
+	{
+		return this.transaction;
+	}
+
+	@XmlElement(name = "Transaction")
+	public void setTransaction(
+		Transaction transaction)
+	{
+		this.transaction = transaction;
+	}
+	
+	public Download getDownload()
+	{
+		return this.download;
+	}
+
+	@XmlElement(name = "Download")
+	public void setDownload(
+		Download download)
+	{
+		this.download = download;
+	}
+	
+	@XmlRootElement(name = "Transaction")
+	public static class Transaction
+	{
+		String	opCode;
+		String	bufferb;
+		String	bufferc;
+		String	cfgExtendedTrxType;
+		
+		public String getOpCode()
+		{
+			return this.opCode;
+		}
+
+		@XmlElement(name = "OpCode")
+		public void setOpCode(
+			String opCode)
+		{
+			this.opCode = opCode;
+		}
+		
+		public String getBufferb()
+		{
+			return this.bufferb;
+		}
+		
+		@XmlElement(name = "BufferB")
+		public void setBufferb(
+			String bufferb)
+		{
+			this.bufferb = bufferb;
+		}
+		
+		public String getBufferc()
+		{
+			return this.bufferc;
+		}
+		
+		@XmlElement(name = "BufferC")
+		public void setBufferc(
+			String bufferc)
+		{
+			this.bufferc = bufferc;
+		}
+		
+		public String getCfgExtendedTrxType()
+		{
+			return this.cfgExtendedTrxType;
+		}
+		
+		@XmlElement(name = "CfgExtendedTrxType")
+		public void setCfgExtendedTrxType(
+			String cfgExtendedTrxType)
+		{
+			this.cfgExtendedTrxType = cfgExtendedTrxType;
+		}
+	}
+	
+	@XmlRootElement(name = "Download")
+	public static class Download
+	{
+		String	atmConfigID;
+		String	atmAppConfigID;
+		String	loadsetGroup;
+		String	downloadApp;
+		
+		public String getATMConfigID()
+		{
+			return this.atmConfigID;
+		}
+		
+		@XmlElement(name = "ATMConfigID")
+		public void setATMConfigID(
+			String atmConfigID)
+		{
+			this.atmConfigID = atmConfigID;
+		}
+
+		public String getAtmAppConfigID()
+		{
+			return this.atmAppConfigID;
+		}
+		
+		@XmlElement(name = "AtmAppConfigID")
+		public void setAtmAppConfigID(
+			String atmAppConfigID)
+		{
+			this.atmAppConfigID = atmAppConfigID;
+		}
+		
+		public String getLoadsetGroup()
+		{
+			return this.loadsetGroup;
+		}
+		
+		@XmlElement(name = "LoadsetGroup")
+		public void setLoadsetGroup(
+			String loadsetGroup)
+		{
+			this.loadsetGroup = loadsetGroup;
+		}
+		
+		public String getDownloadApp()
+		{
+			return this.downloadApp;
+		}
+		
+		@XmlElement(name = "DownloadApp")
+		public void setDownloadApp(
+			String downloadApp)
+		{
+			this.downloadApp = downloadApp;
+		}
+	}
+}
 
