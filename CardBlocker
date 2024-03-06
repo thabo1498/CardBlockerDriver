@@ -1,0 +1,496 @@
+package postilion.realtime.eftc.node.cardblocker;
+
+import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.Unmarshaller;
+
+import postilion.postcard.InfrastructureToolbox;
+import postilion.realtime.sdk.jdbc.JdbcManager;
+import postilion.realtime.sdk.message.FieldSensitizerPan;
+import postilion.realtime.sdk.message.bitmap.Iso8583Post;
+import postilion.realtime.sdk.message.bitmap.StructuredData;
+import postilion.realtime.sdk.message.bitmap.XFieldUnableToConstruct;
+import postilion.realtime.sdk.node.AIntegrationDriver;
+import postilion.realtime.sdk.node.AIntegrationDriverEnvironment;
+import postilion.realtime.sdk.node.Action;
+import postilion.realtime.sdk.util.XPostilion;
+import postilion.realtime.sdk.xml.cardmanagementupdatedata.Card;
+import postilion.realtime.sdk.xml.cardmanagementupdatedata.CardActive;
+import postilion.realtime.sdk.xml.cardmanagementupdatedata.CardManagementUpdateData;
+import postilion.realtime.sdk.xml.cardmanagementupdatedata.Request;
+import postilion.realtime.sdk.util.TimedHashtable;
+
+public class CardBlocker
+extends AIntegrationDriver
+{
+	public static final String			STRUCT_TAG_ADDITIONAL_INFO			= "AdditionalInfo";
+	public static final String			STRUCT_TAG_CUSTOMER_CARD			= "CustomerCard";
+	
+	public static final String			_5201_EXT_TRAN_TYPE_PAN_LOOK_UP	= "5201";
+	public static final String			_5202_EXT_TRAN_TYPE_PAN_HOLD		= "5202";
+	public static ArrayList<Integer>	issuerList								= null;
+	private TimedHashtable				reqStoreHT								= new TimedHashtable(180000L);
+	private TimedHashtable				queriedPanHT								= new TimedHashtable(180000L);
+	
+	@Override
+	public void init(
+		AIntegrationDriverEnvironment node_application,
+		String integration_driver_parameters,
+		String custom_class_parameters)
+	throws Exception
+	{
+		
+		issuerList = retrieveIssuerList();
+		Debug.write("Issuers: " + issuerList);
+		
+	}
+	
+	protected static ArrayList<Integer> retrieveIssuerList()
+	throws XPostilion, SQLException
+	{
+		Debug.write("getting issuers");
+		ArrayList<Integer> tmpIssuerList = new ArrayList<Integer>();
+		Connection cn = null;
+		PreparedStatement stmt = null;
+		ResultSet rs = null;
+		
+		try
+		{
+			cn = InfrastructureToolbox.getConnection();
+			stmt = cn.prepareStatement("SELECT issuer_nr FROM pc_issuers WITH (NOLOCK)");
+			rs = stmt.executeQuery();
+			
+			while (rs.next() == true)
+			{
+				tmpIssuerList.add(Integer.valueOf(rs.getInt(1)));
+			}
+			
+			JdbcManager.commit(cn, stmt, rs);
+		}
+		catch (SQLException e)
+		{
+			tmpIssuerList = new ArrayList<Integer>();
+		}
+		finally
+		{
+			JdbcManager.cleanup(cn, stmt, rs);
+		}
+		
+		if (tmpIssuerList.size() == 0)
+		{
+			throw new XPostilion();
+		}
+		
+		return tmpIssuerList;
+	}
+	
+	@Override
+	public Action processMessageFromTranmgrSourceNode(
+		AIntegrationDriverEnvironment node_application,
+		Iso8583Post msg)
+	throws Exception
+	{
+		// TODO Auto-generated method stub
+		Debug.write("process msg from TMsource node");
+		Debug.write("Switch Key" + msg.getPrivField(Iso8583Post.PrivBit._002_SWITCH_KEY));
+		if (msg.isPrivFieldSet(Iso8583Post.PrivBit._002_SWITCH_KEY))
+		{
+			String switchKey = msg.getPrivField(Iso8583Post.PrivBit._002_SWITCH_KEY);
+			Debug.write("Key is set");
+			if (Iso8583Post.MsgType._0330_ACQUIRER_FILE_UPDATE_ADV_RSP == msg.getMsgType() &&
+				reqStoreHT.containsKey(switchKey))
+			{
+				Debug.write("Key is Present");
+				Iso8583Post msgToRemote = (Iso8583Post) reqStoreHT.get(switchKey);
+				msgToRemote.putMsgType(Iso8583Post.MsgType._0610_ADMIN_REQ_RSP);
+				msgToRemote.copyFieldFrom(Iso8583Post.Bit._039_RSP_CODE, msg);
+				return new Action(null, msgToRemote, null, null);
+			}
+		}
+		
+		return super.processMessageFromTranmgrSourceNode(node_application, msg);
+	}
+	
+	protected String getBufferB(
+		String additional_info)
+	throws Exception
+	{
+		Debug.write("Additional info B :" + additional_info);
+		JAXBContext jaxbConnect = JAXBContext.newInstance(AdditionalInfo.class);
+		Unmarshaller unmarshaller = jaxbConnect.createUnmarshaller();
+		AdditionalInfo additionalInfo = (AdditionalInfo) unmarshaller.unmarshal(
+			new StringReader(additional_info));
+		
+		if (additionalInfo != null && additionalInfo.getTransaction() != null)
+		{
+			Debug.write("buffer b: " + additionalInfo.getTransaction().bufferb);
+			return additionalInfo.getTransaction().bufferb;
+		}
+		return null;
+	}
+	
+	protected String getBufferC(
+		String additional_info)
+	throws Exception
+	{
+		Debug.write("Additional info C: " + additional_info);
+		JAXBContext jaxbConnect = JAXBContext.newInstance(AdditionalInfo.class);
+		Unmarshaller unmarshaller = jaxbConnect.createUnmarshaller();
+		AdditionalInfo additionalInfo = (AdditionalInfo) unmarshaller.unmarshal(
+			new StringReader(additional_info));
+		
+		if (additionalInfo != null && additionalInfo.getTransaction() != null)
+		{
+			
+			Debug.write("buffer b: " + additionalInfo.getTransaction().bufferc);
+			return additionalInfo.getTransaction().bufferc;
+		}
+		
+		return null;
+	}
+	
+	@Override
+	public Action processMsgFromRemote(
+		AIntegrationDriverEnvironment node_application,
+		Iso8583Post msg)
+	throws Exception
+	{
+		// TODO Auto-generated method stub
+		Debug.write("ProcessMsgFrom Remote");
+		if (isCardBlockReqTran(msg))
+		{
+			StructuredData structuredData = new StructuredData();
+			structuredData = msg.getStructuredData();
+			String additionalInfo = structuredData.get(STRUCT_TAG_ADDITIONAL_INFO);
+			
+			if (additionalInfo != null)
+			{
+				Debug.write("additional info is present");
+				String pan = null;
+				
+				try
+				{
+					pan = getPan(additionalInfo);
+					
+				}
+				catch (Exception e)
+				{
+					e.printStackTrace();
+				}
+				
+				Debug.write("Pan: " + pan);
+				if (pan != null && !pan.isEmpty())
+				{
+
+					String nationalIdNumber = getBufferB(additionalInfo);
+					String mobileNumber = getBufferC(additionalInfo);
+					String termID = msg.getField(Iso8583Post.Bit._041_CARD_ACCEPTOR_TERM_ID);
+					String queriedPanKey = nationalIdNumber + termID + mobileNumber;
+					
+					Debug.write("pan found");
+					
+					msg.putMsgType(Iso8583Post.MsgType._0610_ADMIN_REQ_RSP);
+					msg.putField(Iso8583Post.Bit._002_PAN, pan);
+					msg.putField(Iso8583Post.Bit._039_RSP_CODE, Iso8583Post.RspCode._00_SUCCESSFUL);
+					if (msg.getStructuredData() != null)
+					{
+						msg.getStructuredData().clear();
+					}
+					StructuredData structuredDataRsp = new StructuredData();
+					queriedPanHT.put(queriedPanKey,pan);
+					pan=FieldSensitizerPan.maskOutPan(pan);
+					structuredDataRsp.put(STRUCT_TAG_CUSTOMER_CARD, pan);
+					msg.putStructuredData(structuredDataRsp);
+					Debug.write("Key 1: "+ queriedPanKey);
+					return new Action(null, msg, null, null);
+				}
+				
+			}
+			
+		}
+		else if (isConfirmedCardBlockReq(msg))
+		{
+			Debug.write("confirmed Card Block");
+			msg = constructFileUpdateAdvice(msg);
+			
+		}
+		return super.processMsgFromRemote(node_application, msg);
+	}
+	
+	protected Iso8583Post constructFileUpdateAdvice(
+		Iso8583Post msg)
+	throws Exception
+	{
+		// TODO Auto-generated method stub
+		String pan = getStoredPan(msg);
+		// do not clone just use the same msg
+		msg.putMsgType(Iso8583Post.MsgType._0320_ACQUIRER_FILE_UPDATE_ADV);
+		msg.putField(Iso8583Post.Bit._002_PAN, pan);
+		msg.putField(Iso8583Post.Bit._091_FILE_UPDATE_CODE, "2");
+		msg.putField(Iso8583Post.Bit._101_FILE_NAME, "CARD_MANAGEMENT");
+	
+		CardManagementUpdateData data = new CardManagementUpdateData();
+		Request request = new Request();
+		Card card = new Card();
+		card.setPAN(pan);
+		// card.setSequenceNumber();
+		card.setCardActive(CardActive.Y);
+		card.setHoldResponseCode("77");
+		request.setCard(card);
+		data.setRequest(request);
+		
+		if (msg.getStructuredData() != null)
+		{
+			msg.getStructuredData().clear();
+		}
+		StructuredData structuredData = new StructuredData();
+		try
+		{
+			structuredData.putCardManagementUpdateDataRequest(data);
+		}
+		catch (Exception e)
+		{
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+		msg.putStructuredData(structuredData);
+		
+		reqStoreHT.put(msg.getPrivField(Iso8583Post.PrivBit._002_SWITCH_KEY), msg);
+		return msg;
+	}
+	
+	private String getPan(
+		String additionalInfo)
+	throws Exception
+	{
+		// TODO Auto-generated method stub
+		String pan = null;
+		String nationalIdNumber = getBufferB(additionalInfo);
+		String mobileNumber = getBufferC(additionalInfo);
+		
+		Debug.write("National ID number: " + nationalIdNumber);
+		
+		Debug.write("Mobile number: " + mobileNumber);
+		
+		Debug.write("issuer: " + issuerList);
+		for (int issuer : issuerList)
+		{
+			Debug.write("issuer: " + issuer);
+			if (nationalIdNumber != null)
+			{
+				pan = findLinkedPan(issuer, nationalIdNumber);
+			}
+			else if (mobileNumber != null)
+			{
+				pan = findLinkedMobilePan(issuer, mobileNumber);
+			}
+			
+			if (pan != null)
+			{
+				break;
+			}
+		}
+		return pan;
+	}
+	
+	private boolean isConfirmedCardBlockReq(
+		Iso8583Post msg)
+	throws Exception
+	{
+		// TODO Auto-generated method stub
+		Debug.write("method is Confirmed CardBlock");
+		
+		Debug.write("pan :" + msg.getField(Iso8583Post.Bit._002_PAN) + " &&  Pan Track2" +
+			msg.getField(Iso8583Post.Bit._035_TRACK_2_DATA));
+		
+		if (getStoredPan(msg) != null && Iso8583Post.MsgType._0600_ADMIN_REQ == msg.getMsgType() &&
+			_5202_EXT_TRAN_TYPE_PAN_HOLD.equals(
+				msg.getPrivField(Iso8583Post.PrivBit._033_EXTENDED_TRAN_TYPE)) &&
+			Iso8583Post.TranType._91_GENERAL_ADMIN.equals(msg.getProcessingCode().getTranType()))
+		{
+			Debug.write("Pass");
+			return true;
+		}
+		return false;
+	}
+	
+	protected String getStoredPan(
+		Iso8583Post msg)
+	throws Exception
+	{
+		// TODO Auto-generated method stub
+
+		StructuredData structuredData = new StructuredData();
+		structuredData = msg.getStructuredData();
+		
+		String additionalInfo = structuredData.get(STRUCT_TAG_ADDITIONAL_INFO);
+		String termID=msg.getField(Iso8583Post.Bit._041_CARD_ACCEPTOR_TERM_ID);
+		String queriedPanKey=getBufferB(additionalInfo)+termID+getBufferC(additionalInfo);
+		
+		String pan = null;
+		Debug.write("key 2 : "+queriedPanKey);
+		if (queriedPanHT.contains(queriedPanKey))
+		{
+			Debug.write("contains");
+			pan = (String) queriedPanHT.get(queriedPanKey);
+		}
+		return pan;
+	}
+	
+	private boolean isCardBlockReqTran(
+		Iso8583Post msg)
+	throws XFieldUnableToConstruct
+	{
+		// TODO Auto-generated method stub
+		if (Iso8583Post.MsgType._0600_ADMIN_REQ == msg.getMsgType() &&
+			_5201_EXT_TRAN_TYPE_PAN_LOOK_UP.equals(
+				msg.getPrivField(Iso8583Post.PrivBit._033_EXTENDED_TRAN_TYPE)) &&
+			Iso8583Post.TranType._91_GENERAL_ADMIN.equals(msg.getProcessingCode().getTranType()))
+		{
+			Debug.write("Yes, CardBlock Req");
+			return true;
+		}
+		return false;
+	}
+	
+	protected String findLinkedPan(
+		int issuerNumber,
+		String nationalIdNumber)
+	throws Exception
+	{
+		String sqlQuery = null;
+		String pan = null;
+		String activeCardsTable = null;
+		String activeCustomersTable = null;
+		
+		Debug.write("FindLinkedPan");
+		
+		try
+		{
+			activeCardsTable = InfrastructureToolbox.getActiveCardsTablename(issuerNumber);
+			activeCustomersTable = InfrastructureToolbox.getActiveCustomersTablename(issuerNumber);
+		}
+		catch (NullPointerException e)
+		{
+			pan = null;
+		}
+		
+		Connection connection = null;
+		PreparedStatement prepareStatement = null;
+		ResultSet resultSet = null;
+		
+		if (InfrastructureToolbox.isIssuerProtected(issuerNumber))
+		{
+			nationalIdNumber = InfrastructureToolbox.getEncryptedStringValueIfIssuerProtected(
+				issuerNumber, nationalIdNumber);
+			
+			sqlQuery = "SELECT pan_encrypted FROM " + activeCardsTable + " WITH (nolock) " +
+				"WHERE date_deleted IS NULL " + "AND customer_id = (SELECT TOP 1 customer_id FROM " +
+				activeCustomersTable + " WITH (nolock) WHERE national_id_nr_encrypted = '" +
+				nationalIdNumber + "')";
+		}
+		else
+		{
+			sqlQuery = "SELECT pan FROM " + activeCardsTable + " WITH (nolock) " +
+				"WHERE date_deleted IS NULL " + "AND customer_id = (SELECT TOP 1 customer_id FROM " +
+				activeCustomersTable + " WITH (nolock) WHERE national_id_nr = '" + nationalIdNumber +
+				"')";
+			
+		}
+		
+		try
+		{
+			connection = InfrastructureToolbox.getConnection();
+			
+			prepareStatement = connection.prepareStatement(sqlQuery);
+			
+			resultSet = prepareStatement.executeQuery();
+			
+			if (resultSet.next())
+			{
+				pan = InfrastructureToolbox.getDecryptedStringValueIfIssuerProtected(issuerNumber,
+					resultSet.getString(1), resultSet.getString(1));
+			}
+			
+			JdbcManager.commit(connection, prepareStatement, resultSet);
+		}
+		finally
+		{
+			JdbcManager.cleanup(connection, prepareStatement, resultSet);
+		}
+		
+		Debug.write("PAN" + pan);
+		return pan;
+	}
+	
+	protected String findLinkedMobilePan(
+		int issuerNumber,
+		String mobileNumber)
+	throws Exception
+	{
+		String sqlQuery = null;
+		String pan = null;
+		String activeCardsTable = null;
+		String activeCustomersTable = null;
+		Debug.write("find linked mobile Pan");
+		try
+		{
+			activeCardsTable = InfrastructureToolbox.getActiveCardsTablename(issuerNumber);
+			activeCustomersTable = InfrastructureToolbox.getActiveCustomersTablename(issuerNumber);
+		}
+		catch (NullPointerException e)
+		{
+			pan = null;
+		}
+		
+		Connection connection = null;
+		PreparedStatement prepareStatement = null;
+		ResultSet resultSet = null;
+		
+		if (InfrastructureToolbox.isIssuerProtected(issuerNumber))
+		{
+			
+			sqlQuery = "SELECT pan_encrypted FROM " + activeCardsTable + " WITH (nolock) " +
+				"WHERE date_deleted IS NULL " + "AND customer_id = (SELECT TOP 1 customer_id FROM " +
+				activeCustomersTable + " WITH (nolock) WHERE mobile_nr = '" + mobileNumber + "')";
+		}
+		else
+		{
+			sqlQuery = "SELECT pan FROM " + activeCardsTable + " WITH (nolock) " +
+				"WHERE date_deleted IS NULL " + "AND customer_id = (SELECT TOP 1 customer_id FROM " +
+				activeCustomersTable + " WITH (nolock) WHERE mobile_nr = '" + mobileNumber + "')";
+			
+		}
+		
+		try
+		{
+			connection = InfrastructureToolbox.getConnection();
+			
+			prepareStatement = connection.prepareStatement(sqlQuery);
+			
+			resultSet = prepareStatement.executeQuery();
+			
+			if (resultSet.next())
+			{
+				pan = InfrastructureToolbox.getDecryptedStringValueIfIssuerProtected(issuerNumber,
+					resultSet.getString(1), resultSet.getString(1));
+			}
+			
+			JdbcManager.commit(connection, prepareStatement, resultSet);
+		}
+		finally
+		{
+			JdbcManager.cleanup(connection, prepareStatement, resultSet);
+		}
+		
+		Debug.write("PAN Mobile" + pan);
+		return pan;
+	}
+	
+}
